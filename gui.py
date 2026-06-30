@@ -69,15 +69,26 @@ class Application(tk.Tk):
         self._add_file_row(input_frame, row=0, label="今月分ファイル:", var=self.csv_var,
                            command=self._select_csv)
 
+        # 単価0円商材ファイル（専用）
+        self.zero_price_var = tk.StringVar()
+        self._add_file_row(input_frame, row=1, label="単価0円商材ファイル:", var=self.zero_price_var,
+                           command=self._select_zero_price)
+        ttk.Label(input_frame, text="↑ 単価0円商材_データ絞り方.xlsx 等。指定時は前月分Excelより優先。",
+                  foreground="#666666", font=("Yu Gothic UI", 8)).grid(
+            row=2, column=1, columnspan=2, sticky=tk.W, padx=(6, 0))
+
         # 前月分完成 Excel
         self.prev_excel_var = tk.StringVar()
-        self._add_file_row(input_frame, row=1, label="前月分完成Excel:", var=self.prev_excel_var,
+        self._add_file_row(input_frame, row=3, label="前月分完成Excel:", var=self.prev_excel_var,
                            command=self._select_prev_excel)
+        ttk.Label(input_frame, text="↑ 上記未指定時に使用。「単価0円商材」「データの絞り方」シートを参照。",
+                  foreground="#666666", font=("Yu Gothic UI", 8)).grid(
+            row=4, column=1, columnspan=2, sticky=tk.W, padx=(6, 0))
 
         # 処理対象年月
-        ttk.Label(input_frame, text="処理対象年月:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        ttk.Label(input_frame, text="処理対象年月:").grid(row=5, column=0, sticky=tk.W, pady=4)
         month_frame = ttk.Frame(input_frame)
-        month_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=(6, 0))
+        month_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W, padx=(6, 0))
 
         self.year_var = tk.StringVar()
         ttk.Spinbox(month_frame, from_=2020, to=2099, textvariable=self.year_var,
@@ -97,14 +108,14 @@ class Application(tk.Tk):
 
         # 出力先フォルダ
         self.output_folder_var = tk.StringVar()
-        self._add_folder_row(input_frame, row=3, label="出力先フォルダ:", var=self.output_folder_var,
+        self._add_folder_row(input_frame, row=6, label="出力先フォルダ:", var=self.output_folder_var,
                              command=self._select_output_folder)
 
         # 出力ファイル名
-        ttk.Label(input_frame, text="出力ファイル名:").grid(row=4, column=0, sticky=tk.W, pady=4)
+        ttk.Label(input_frame, text="出力ファイル名:").grid(row=7, column=0, sticky=tk.W, pady=4)
         self.output_name_var = tk.StringVar()
         ttk.Entry(input_frame, textvariable=self.output_name_var, font=("Yu Gothic UI", 9)).grid(
-            row=4, column=1, columnspan=2, sticky=tk.EW, padx=(6, 4)
+            row=7, column=1, columnspan=2, sticky=tk.EW, padx=(6, 4)
         )
 
         # ── 実行ボタン ───────────────────────────────
@@ -185,6 +196,14 @@ class Application(tk.Tk):
         if path:
             self.csv_var.set(path)
 
+    def _select_zero_price(self) -> None:
+        path = filedialog.askopenfilename(
+            title="単価0円商材ファイルを選択",
+            filetypes=[("Excelファイル", "*.xlsx *.xlsm *.xls"), ("すべてのファイル", "*.*")],
+        )
+        if path:
+            self.zero_price_var.set(path)
+
     def _select_prev_excel(self) -> None:
         path = filedialog.askopenfilename(
             title="前月分完成Excelを選択",
@@ -202,6 +221,7 @@ class Application(tk.Tk):
 
     def _validate_inputs(self) -> bool:
         csv = self.csv_var.get().strip()
+        zero_price = self.zero_price_var.get().strip()
         prev_excel = self.prev_excel_var.get().strip()
         output_folder = self.output_folder_var.get().strip()
 
@@ -211,10 +231,14 @@ class Application(tk.Tk):
         if not os.path.isfile(csv):
             messagebox.showerror("入力エラー", f"今月分ファイルが見つかりません:\n{csv}")
             return False
-        if not prev_excel:
-            messagebox.showerror("入力エラー", "前月分完成Excelを選択してください。")
+        if not zero_price and not prev_excel:
+            messagebox.showerror("入力エラー",
+                                 "「単価0円商材ファイル」または「前月分完成Excel」のいずれかを選択してください。")
             return False
-        if not os.path.isfile(prev_excel):
+        if zero_price and not os.path.isfile(zero_price):
+            messagebox.showerror("入力エラー", f"単価0円商材ファイルが見つかりません:\n{zero_price}")
+            return False
+        if prev_excel and not os.path.isfile(prev_excel):
             messagebox.showerror("入力エラー", f"前月分完成Excelが見つかりません:\n{prev_excel}")
             return False
         try:
@@ -321,7 +345,7 @@ class Application(tk.Tk):
             return
 
         # 前月分Excel読込中、除外判定中などのステップを認識
-        if "前月分Excel読込中" in msg:
+        if "単価0円商材ファイル読込中" in msg or "前月分Excel読込中" in msg:
             self.progress_bar["value"] = 68
             self.progress_label.config(text="68%")
         elif "除外判定中" in msg:
@@ -349,6 +373,7 @@ class Application(tk.Tk):
         self._poll_queue()  # キューポーリング開始
 
         csv_path = self.csv_var.get().strip()
+        zero_price_path = self.zero_price_var.get().strip()
         prev_excel_path = self.prev_excel_var.get().strip()
         target_year = int(self.year_var.get())
         target_month = int(self.month_var.get())
@@ -356,18 +381,22 @@ class Application(tk.Tk):
         output_name = self.output_name_var.get().strip()
 
         self._log(f"処理開始: {target_year}年{target_month}月")
-        self._log(f"入力ファイル  : {os.path.basename(csv_path)}")
-        self._log(f"前月分Excel  : {os.path.basename(prev_excel_path)}")
-        self._log(f"出力先       : {output_folder}")
+        self._log(f"入力ファイル     : {os.path.basename(csv_path)}")
+        if zero_price_path:
+            self._log(f"単価0円商材ファイル: {os.path.basename(zero_price_path)}")
+        if prev_excel_path:
+            self._log(f"前月分Excel    : {os.path.basename(prev_excel_path)}")
+        self._log(f"出力先          : {output_folder}")
         self._log("-" * 55)
 
         def worker() -> None:
             try:
                 result = processor.process_data(
                     csv_path=csv_path,
-                    prev_excel_path=prev_excel_path,
                     target_year=target_year,
                     target_month=target_month,
+                    zero_price_xlsx_path=zero_price_path,
+                    prev_excel_path=prev_excel_path,
                     progress_callback=lambda m: self._msg_queue.put(("progress", m)),
                 )
 

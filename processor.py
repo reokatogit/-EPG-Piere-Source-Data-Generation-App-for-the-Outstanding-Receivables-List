@@ -3,7 +3,9 @@ processor.py - 業務ロジック（除外判定・シート生成・Excel出力
 
 処理フロー:
   1. CSV 読込 → DataFrame (moto)
-  2. 前月分 Excel から「単価0円商材」「データの絞り方」を読込
+  2. 単価0円商材の読込（以下いずれか）
+       a. 単価0円商材ファイル（単価0円商材_データ絞り方.xlsx 等）を指定した場合 → そちらを優先
+       b. 前月分完成Excel を指定した場合 → 「単価0円商材」「データの絞り方」シートを読込
   3. 除外判定 ②〜⑧ を順番に適用
   4. in-memory で openpyxl Workbook を生成（シート一式）
   5. GUI が警告確認後に save_result() を呼んで保存
@@ -67,6 +69,7 @@ class ProcessingResult:
     _target_year: int = 0
     _target_month: int = 0
     _csv_path: str = ""
+    _zero_price_xlsx_path: str = ""
     _prev_excel_path: str = ""
 
 
@@ -260,19 +263,23 @@ def _copy_rows_to_sheet(target_wb: Workbook, sheet_name: str, rows: list[tuple])
 
 def process_data(
     csv_path: str,
-    prev_excel_path: str,
     target_year: int,
     target_month: int,
+    zero_price_xlsx_path: str = "",
+    prev_excel_path: str = "",
     progress_callback: Callable[[str], None] | None = None,
 ) -> ProcessingResult:
     """
     データを読み込み・加工して in-memory Workbook を生成して返す。
+    zero_price_xlsx_path と prev_excel_path はどちらか一方（または両方）を指定する。
+    両方指定時は zero_price_xlsx_path を優先して単価0円商材を読込む。
     保存は行わない（GUI が警告確認後に save_result() を呼ぶ）。
     """
     result = ProcessingResult(
         _target_year=target_year,
         _target_month=target_month,
         _csv_path=csv_path,
+        _zero_price_xlsx_path=zero_price_xlsx_path,
         _prev_excel_path=prev_excel_path,
     )
 
@@ -305,49 +312,81 @@ def process_data(
         result.errors.append(f"必須列が見つかりません: {', '.join(missing_cols)}")
         return result
 
-    # ── 前月分 Excel 読込 ────────────────────────
-    progress("前月分Excel読込中...")
-    try:
-        prev_wb = openpyxl.load_workbook(prev_excel_path, read_only=True, data_only=True)
-    except Exception as e:
-        result.errors.append(f"前月分完成Excelの読込に失敗しました: {e}")
-        return result
-
-    # 単価0円商材シート
+    # ── 単価0円商材・データの絞り方 読込 ─────────────────
     zero_price_products: set[str] = set()
-    prev_zero_price_rows: list[tuple] = []
-    if "単価0円商材" in prev_wb.sheetnames:
-        ws = prev_wb["単価0円商材"]
-        # ヘッダ行を確認して商品名列を特定
+    zero_price_rows: list[tuple] = []
+    prev_filter_rows: list[tuple] = []
+
+    def _load_zero_price_sheet(wb_obj) -> None:
+        """openpyxl Workbook から単価0円商材シートを読み込んで zero_price_* に格納。"""
+        if "単価0円商材" not in wb_obj.sheetnames:
+            result.warnings.append("指定ファイルに「単価0円商材」シートが見つかりません。除外⑤の判定をスキップします。")
+            return
+        ws = wb_obj["単価0円商材"]
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        shohin_col_idx = 0  # デフォルト: 1列目
+        shohin_col_idx = 0
         if header_row:
-            prev_zero_price_rows.append(header_row)
+            zero_price_rows.append(header_row)
             for i, h in enumerate(header_row):
                 if h and "商品" in str(h):
                     shohin_col_idx = i
                     break
         for row in ws.iter_rows(min_row=2, values_only=True):
-            prev_zero_price_rows.append(row)
+            zero_price_rows.append(row)
             if row and len(row) > shohin_col_idx and row[shohin_col_idx]:
                 val = str(row[shohin_col_idx]).strip()
                 if val:
                     zero_price_products.add(normalize_col_name(val))
+
+    if zero_price_xlsx_path:
+        # ── 専用ファイル（単価0円商材_データ絞り方.xlsx 等）から読込 ──
+        progress("単価0円商材ファイル読込中...")
+        try:
+            zp_wb = openpyxl.load_workbook(zero_price_xlsx_path, read_only=True, data_only=True)
+            _load_zero_price_sheet(zp_wb)
+            # データの絞り方も同ファイルにあれば読込
+            if "データの絞り方" in zp_wb.sheetnames:
+                for row in zp_wb["データの絞り方"].iter_rows(values_only=True):
+                    prev_filter_rows.append(row)
+            zp_wb.close()
+            progress(f"単価0円商材: {len(zero_price_products)} 件読込")
+        except Exception as e:
+            result.errors.append(f"単価0円商材ファイルの読込に失敗しました: {e}")
+            return result
+
+        # 前月分Excelが同時に指定されていればデータの絞り方を上書き（優先）
+        if prev_excel_path:
+            try:
+                prev_wb = openpyxl.load_workbook(prev_excel_path, read_only=True, data_only=True)
+                if "データの絞り方" in prev_wb.sheetnames:
+                    prev_filter_rows.clear()
+                    for row in prev_wb["データの絞り方"].iter_rows(values_only=True):
+                        prev_filter_rows.append(row)
+                prev_wb.close()
+            except Exception:
+                pass  # データの絞り方は補助情報なのでエラーでも続行
+
+    elif prev_excel_path:
+        # ── 前月分完成Excel から読込（旧来方式）──
+        progress("前月分Excel読込中...")
+        try:
+            prev_wb = openpyxl.load_workbook(prev_excel_path, read_only=True, data_only=True)
+        except Exception as e:
+            result.errors.append(f"前月分完成Excelの読込に失敗しました: {e}")
+            return result
+        _load_zero_price_sheet(prev_wb)
         progress(f"単価0円商材: {len(zero_price_products)} 件読込")
-    else:
-        result.warnings.append("前月分Excelに「単価0円商材」シートが見つかりません。除外⑤の判定をスキップします。")
+        if "データの絞り方" in prev_wb.sheetnames:
+            for row in prev_wb["データの絞り方"].iter_rows(values_only=True):
+                prev_filter_rows.append(row)
+            progress("データの絞り方シート読込完了")
+        else:
+            result.warnings.append("前月分Excelに「データの絞り方」シートが見つかりません。空シートを作成します。")
+        prev_wb.close()
 
-    # データの絞り方シート
-    prev_filter_rows: list[tuple] = []
-    if "データの絞り方" in prev_wb.sheetnames:
-        ws = prev_wb["データの絞り方"]
-        for row in ws.iter_rows(values_only=True):
-            prev_filter_rows.append(row)
-        progress("データの絞り方シート読込完了")
     else:
-        result.warnings.append("前月分Excelに「データの絞り方」シートが見つかりません。空シートを作成します。")
-
-    prev_wb.close()
+        result.errors.append("単価0円商材ファイルまたは前月分完成Excelのいずれかを指定してください。")
+        return result
 
     # ── 除外判定 ─────────────────────────────────
     progress("除外判定中...")
@@ -370,17 +409,15 @@ def process_data(
 
     group_col_name = col_map.get("商品グループ")
 
-    # ① 単価0円商材シート（前月からコピー）
-    if prev_zero_price_rows:
-        _copy_rows_to_sheet(wb, "単価0円商材", prev_zero_price_rows)
+    # ① 単価0円商材シート
+    if zero_price_rows:
+        _copy_rows_to_sheet(wb, "単価0円商材", zero_price_rows)
     else:
         wb.create_sheet("単価0円商材")
 
-    # ② データの絞り方シート（前月からコピー）
+    # ② データの絞り方シート（前月分Excelから読込した場合のみ）
     if prev_filter_rows:
         _copy_rows_to_sheet(wb, "データの絞り方", prev_filter_rows)
-    else:
-        wb.create_sheet("データの絞り方")
 
     # ③ moto シート（全データ + 追加7列）
     ws_moto = wb.create_sheet("moto")
@@ -484,9 +521,10 @@ def _write_log(result: ProcessingResult, log_path: str) -> None:
     lines = [
         f"処理日時       : {now_str}",
         f"処理対象年月   : {result._target_year}年{result._target_month}月",
-        f"入力CSV        : {result._csv_path}",
-        f"前月分Excel    : {result._prev_excel_path}",
-        f"出力ファイル   : {result.output_file}",
+        f"入力CSV            : {result._csv_path}",
+        f"単価0円商材ファイル: {result._zero_price_xlsx_path or '（未指定）'}",
+        f"前月分Excel        : {result._prev_excel_path or '（未指定）'}",
+        f"出力ファイル       : {result.output_file}",
         "",
         "--- 処理結果 ---",
         f"読込件数 : {result.total_count} 件",
