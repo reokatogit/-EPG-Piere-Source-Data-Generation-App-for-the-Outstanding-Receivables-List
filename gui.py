@@ -170,8 +170,13 @@ class Application(tk.Tk):
 
     def _set_default_month(self) -> None:
         now = datetime.now()
-        self.year_var.set(str(now.year))
-        self.month_var.set(str(now.month))
+        # デフォルトは前月（毎月末〜翌月頭に実行する想定）
+        if now.month == 1:
+            year, month = now.year - 1, 12
+        else:
+            year, month = now.year, now.month - 1
+        self.year_var.set(str(year))
+        self.month_var.set(str(month))
         self._update_default_filename()
         # 年月変更時にファイル名を自動更新
         self.year_var.trace_add("write", lambda *_: self._update_default_filename())
